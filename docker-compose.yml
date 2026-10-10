@@ -1,0 +1,122 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: insurance_genai_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-insurance_genai}
+    ports:
+      - "${HOST_POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/scripts/init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-insurance_genai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - insurance_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: insurance_genai_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${HOST_REDIS_PORT:-6381}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - insurance_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: insurance_genai_backend
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "${HOST_BACKEND_PORT:-8005}:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-insurance_genai}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-supersecretjwtkeychangeinproductionminimum32characterslong}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-D7MvZ8q7X8zBqG2WjX8_4T7fN_3kY9pQ5mR1sT3vW4Y=}
+      - STORAGE_LOCAL_PATH=/app/storage
+    volumes:
+      - ./backend:/app
+      - storage_data:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - insurance_net
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: insurance_genai_worker
+    restart: unless-stopped
+    command: ["python", "-m", "arq", "app.workers.worker.WorkerSettings"]
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-insurance_genai}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-supersecretjwtkeychangeinproductionminimum32characterslong}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-D7MvZ8q7X8zBqG2WjX8_4T7fN_3kY9pQ5mR1sT3vW4Y=}
+      - STORAGE_LOCAL_PATH=/app/storage
+    volumes:
+      - ./backend:/app
+      - storage_data:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - insurance_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: insurance_genai_frontend
+    restart: unless-stopped
+    ports:
+      - "${HOST_FRONTEND_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:${HOST_BACKEND_PORT:-8005}/api/v1
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    networks:
+      - insurance_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  storage_data:
+
+networks:
+  insurance_net:
+    driver: bridge
